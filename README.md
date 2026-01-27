@@ -1,5 +1,7 @@
 # Isaac P2P Network
 
+中文 | [English](README_EN.md)
+
 为《以撒的结合》(The Binding of Isaac) 提供的 TCP P2P 网络中继解决方案，通过 Hook Steam P2P API 实现游戏联机功能。
 
 ## 功能特性
@@ -166,6 +168,13 @@ Hook DLL 使用 Windows ETW TraceLogging 进行调试：
 
 ### 查看调试日志
 使用 ETW 工具捕获 `P2PHookProvider` 的日志事件。
+
+## TODO
+
+- [ ] **客户端重连机制** - 当前客户端在连接断开后不会自动重连，需要重启游戏。计划添加自动重连功能，包括：
+  - 检测连接断开
+  - 指数退避重连策略
+  - 重连期间的数据包缓存
 
 ## 许可证
 
