@@ -172,10 +172,39 @@ struct Connection {
     }
 };
 
+// 将8字节标记转换为uint64_t用于map key
+inline uint64_t mark_to_key(const uint8_t* mark) {
+    uint64_t key;
+    std::memcpy(&key, mark, sizeof(key));
+    return key;
+}
+
+// 全局连接管理
+std::unordered_map<int, Connection> g_connections;      // fd -> Connection
+std::unordered_map<uint64_t, int> g_mark_to_fd;         // mark -> fd
+
+static std::atomic<uint64_t> g_stat_bytes_in{0};
+static std::atomic<uint64_t> g_stat_bytes_out{0};
+static std::atomic<uint64_t> g_stat_packets_in{0};
+static std::atomic<uint64_t> g_stat_packets_out{0};
+static std::atomic<uint64_t> g_stat_drop_no_target{0};
+static std::atomic<uint64_t> g_stat_drop_small_packet{0};
+static std::atomic<uint64_t> g_stat_drop_send_eagain{0};
+static std::atomic<uint64_t> g_stat_partial_writes{0};
+static std::atomic<uint64_t> g_stat_write_errors{0};
+static std::atomic<uint64_t> g_stat_event_loops{0};
+static std::atomic<uint64_t> g_stat_events{0};
+
+void close_connection(int fd, int epfd);
+
 static bool update_epoll_events(int epfd, int fd, bool want_write) {
     struct epoll_event ev;
     ev.data.fd = fd;
-    ev.events = EPOLLIN | (want_write ? EPOLLOUT : 0);
+    uint32_t events = EPOLLIN;
+    if (want_write) {
+        events |= EPOLLOUT;
+    }
+    ev.events = events;
     if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) == -1) {
         LOGE("epoll_ctl MOD 失败 fd=%d: %s", fd, strerror(errno));
         return false;
@@ -210,39 +239,6 @@ static void flush_send_buffer(Connection& conn, int epfd) {
     (void)update_epoll_events(epfd, conn.fd, false);
 }
 
-// 将8字节标记转换为uint64_t用于map key
-inline uint64_t mark_to_key(const uint8_t* mark) {
-    uint64_t key;
-    std::memcpy(&key, mark, sizeof(key));
-    return key;
-}
-
-// 全局连接管理
-std::unordered_map<int, Connection> g_connections;      // fd -> Connection
-std::unordered_map<uint64_t, int> g_mark_to_fd;         // mark -> fd
-
-static std::atomic<uint64_t> g_stat_bytes_in{0};
-static std::atomic<uint64_t> g_stat_bytes_out{0};
-static std::atomic<uint64_t> g_stat_packets_in{0};
-static std::atomic<uint64_t> g_stat_packets_out{0};
-static std::atomic<uint64_t> g_stat_drop_no_target{0};
-static std::atomic<uint64_t> g_stat_drop_small_packet{0};
-static std::atomic<uint64_t> g_stat_drop_send_eagain{0};
-static std::atomic<uint64_t> g_stat_partial_writes{0};
-static std::atomic<uint64_t> g_stat_write_errors{0};
-static std::atomic<uint64_t> g_stat_event_loops{0};
-static std::atomic<uint64_t> g_stat_events{0};
-
-void close_connection(int fd, int epfd);
-
-// 信号处理函数 - 只能使用异步信号安全的操作
-void signal_handler(int signum) {
-    if (signum == SIGINT || signum == SIGTERM) {
-        // 只设置标志，不调用非异步信号安全的函数（如printf、syslog等）
-        g_running = 0;
-    }
-}
-
 void handle_client_write(int fd, int epfd) {
     auto it = g_connections.find(fd);
     if (it == g_connections.end()) {
@@ -250,6 +246,14 @@ void handle_client_write(int fd, int epfd) {
         return;
     }
     flush_send_buffer(it->second, epfd);
+}
+
+// 信号处理函数 - 只能使用异步信号安全的操作
+void signal_handler(int signum) {
+    if (signum == SIGINT || signum == SIGTERM) {
+        // 只设置标志，不调用非异步信号安全的函数（如printf、syslog等）
+        g_running = 0;
+    }
 }
 
 // 设置socket为非阻塞模式
