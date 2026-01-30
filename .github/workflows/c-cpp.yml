@@ -3,6 +3,8 @@ name: C/C++ CI
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*"
   pull_request:
     branches: [ "main" ]
 
@@ -68,3 +70,19 @@ jobs:
             cat relay_server.log
           fi
         working-directory: server
+
+      - name: Upload relay server artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay_server-linux
+          path: |
+            server/relay_server
+          if-no-files-found: error
+
+      - name: Create GitHub Release (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            server/relay_server
