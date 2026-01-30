@@ -4,7 +4,7 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 DEBUG_FLAGS = -std=c++17 -Wall -Wextra -g -O0 -DDEBUG_MODE
 TARGET = relay_server
-SRC = relay_server.cpp
+SRC = main.cpp
 
 .PHONY: all clean debug run
 
