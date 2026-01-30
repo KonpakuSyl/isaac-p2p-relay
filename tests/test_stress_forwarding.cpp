@@ -99,8 +99,8 @@ bool test_two_clients_high_throughput() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     
     // 开始高吞吐量测试
-    const int num_messages = 50;  // 发送50条消息
-    const size_t message_size = 128; // 每条消息128B
+    const int num_messages = 500;  // 发送500条消息
+    const size_t message_size = 256; // 每条消息256B
     
     std::atomic<int> received_count(0);
     std::atomic<int> sent_count(0);
@@ -131,7 +131,7 @@ bool test_two_clients_high_throughput() {
             }
             
             // 短暂延迟以避免过快发送导致缓冲区溢出
-            std::this_thread::sleep_for(std::chrono::microseconds(5000));
+            std::this_thread::sleep_for(std::chrono::microseconds(1000));
         }
     });
     
@@ -276,8 +276,8 @@ bool test_three_clients_high_throughput() {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     
     // 开始高吞吐量测试 - 三个客户端互相发送数据
-    const int num_messages_per_client = 20;  // 每客户端20条消息
-    const size_t message_size = 64; // 每条消息64B
+    const int num_messages_per_client = 200;  // 每客户端200条消息
+    const size_t message_size = 128; // 每条消息128B
     
     std::atomic<int> total_sent(0);
     std::atomic<int> total_received(0);
@@ -316,7 +316,7 @@ bool test_three_clients_high_throughput() {
                 }
                 
                 // 添加短暂延迟以避免过载
-                std::this_thread::sleep_for(std::chrono::microseconds(5000));
+                std::this_thread::sleep_for(std::chrono::microseconds(1000));
             }
         });
     }
@@ -326,7 +326,7 @@ bool test_three_clients_high_throughput() {
     
     for (int receiver = 0; receiver < 3; receiver++) {
         recv_threads.emplace_back([&, receiver]() {
-            int expected_messages = num_messages_per_client * 2;  // 从其他两个客户端接收
+            int expected_messages = num_messages_per_client;  // 从其他两个客户端接收（对方各发送一半）
             int received = 0;
             
             for (int i = 0; i < expected_messages; i++) {
@@ -387,7 +387,7 @@ cleanup:
         t.join();
     }
     
-    int expected_total = num_messages_per_client * 2 * 3;  // 每个客户端接收来自其他2个客户端的消息
+    int expected_total = num_messages_per_client * 3;  // 每个发送者发送num_messages_per_client条，总计3倍
     
     std::cout << "High throughput test with 3 clients: Expected " << expected_total 
               << " messages, sent " << total_sent.load()

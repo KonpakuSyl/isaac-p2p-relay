@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <cstdarg>
 #include <ctime>
+#include <atomic>
+#include <chrono>
 #include <unordered_map>
 #include <array>
 
@@ -177,6 +179,18 @@ inline uint64_t mark_to_key(const uint8_t* mark) {
 // 全局连接管理
 std::unordered_map<int, Connection> g_connections;      // fd -> Connection
 std::unordered_map<uint64_t, int> g_mark_to_fd;         // mark -> fd
+
+static std::atomic<uint64_t> g_stat_bytes_in{0};
+static std::atomic<uint64_t> g_stat_bytes_out{0};
+static std::atomic<uint64_t> g_stat_packets_in{0};
+static std::atomic<uint64_t> g_stat_packets_out{0};
+static std::atomic<uint64_t> g_stat_drop_no_target{0};
+static std::atomic<uint64_t> g_stat_drop_small_packet{0};
+static std::atomic<uint64_t> g_stat_drop_send_eagain{0};
+static std::atomic<uint64_t> g_stat_partial_writes{0};
+static std::atomic<uint64_t> g_stat_write_errors{0};
+static std::atomic<uint64_t> g_stat_event_loops{0};
+static std::atomic<uint64_t> g_stat_events{0};
 
 // 信号处理函数 - 只能使用异步信号安全的操作
 void signal_handler(int signum) {
@@ -348,6 +362,8 @@ inline void write_packet_length(uint8_t* buf, uint32_t len) {
 bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, int epfd) {
     int fd = conn.fd;
 
+    g_stat_packets_in.fetch_add(1, std::memory_order_relaxed);
+
     // 首次数据：注册标记
     // 包格式: 4字节长度 + 8字节标记
     if (!conn.registered) {
@@ -378,6 +394,7 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
     // 包格式: 4字节长度 + 8字节目标标记 + 实际数据
     if (data_len < MARK_SIZE) {
         LOGW("数据包过小，无法解析目标标记 fd=%d size=%u", fd, data_len);
+        g_stat_drop_small_packet.fetch_add(1, std::memory_order_relaxed);
         return true;  // 丢弃但不断开连接
     }
 
@@ -389,6 +406,7 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
         // 目标不存在，丢弃
         LOGW("目标不存在，丢弃数据 from_fd=%d target_mark=%s data_size=%u",
                  fd, Logger::format_mark(data).c_str(), data_len - MARK_SIZE);
+        g_stat_drop_no_target.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -412,17 +430,21 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
 
         size_t total_len = LENGTH_SIZE + payload_len;
         ssize_t sent = writev(target_fd, iov, 2);
+        size_t forwarded_bytes = 0;
 
         if (sent == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // 发送缓冲区满，丢弃此包（简单处理，避免复杂的写缓冲区管理）
                 LOGW("发送缓冲区满，丢弃数据 target_fd=%d size=%u", target_fd, payload_len);
+                g_stat_drop_send_eagain.fetch_add(1, std::memory_order_relaxed);
             } else {
                 LOGE("writev失败 target_fd=%d: %s", target_fd, strerror(errno));
+                g_stat_write_errors.fetch_add(1, std::memory_order_relaxed);
                 close_connection(target_fd, epfd);
             }
         } else if (static_cast<size_t>(sent) < total_len) {
             // 部分写入，重试发送剩余数据
+            g_stat_partial_writes.fetch_add(1, std::memory_order_relaxed);
             int retry_count = 3;
             size_t total_sent = sent;
             while (total_sent < total_len && retry_count > 0) {
@@ -434,9 +456,12 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
                     usleep(100);
                 } else {
                     LOGE("写入失败 target_fd=%d: %s", target_fd, strerror(errno));
+                    g_stat_write_errors.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
             }
+
+            forwarded_bytes = total_sent;
 
             if (total_sent < total_len) {
                 LOGW("重试后仍有数据未发送 target_fd=%d sent=%zu/%zu",
@@ -444,6 +469,14 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
             }
         } else {
             LOGD("转发 from_fd=%d -> target_fd=%d size=%u", fd, target_fd, payload_len);
+            forwarded_bytes = static_cast<size_t>(sent);
+        }
+
+        if (forwarded_bytes > 0) {
+            g_stat_bytes_out.fetch_add(static_cast<uint64_t>(forwarded_bytes), std::memory_order_relaxed);
+            if (forwarded_bytes == total_len) {
+                g_stat_packets_out.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -483,6 +516,7 @@ void handle_client_data(int fd, int epfd) {
     }
 
     conn.recv_len += n;
+    g_stat_bytes_in.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
     LOGD("收到数据 fd=%d size=%zd total_buffered=%zu", fd, n, conn.recv_len);
 
     // 循环处理所有完整的数据包
@@ -601,8 +635,22 @@ int main(int argc, char* argv[]) {
     // 事件数组
     struct epoll_event events[MAX_EVENTS];
 
+    uint64_t last_bytes_in = 0;
+    uint64_t last_bytes_out = 0;
+    uint64_t last_packets_in = 0;
+    uint64_t last_packets_out = 0;
+    uint64_t last_drop_no_target = 0;
+    uint64_t last_drop_small_packet = 0;
+    uint64_t last_drop_send_eagain = 0;
+    uint64_t last_partial_writes = 0;
+    uint64_t last_write_errors = 0;
+    uint64_t last_event_loops = 0;
+    uint64_t last_events = 0;
+    auto last_perf_ts = std::chrono::steady_clock::now();
+
     // 主循环
     while (g_running) {
+        g_stat_event_loops.fetch_add(1, std::memory_order_relaxed);
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, 1000);  // 1秒超时，便于检查g_running
 
         if (nfds == -1) {
@@ -614,6 +662,68 @@ int main(int argc, char* argv[]) {
         }
 
         LOGD("epoll_wait返回 nfds=%d", nfds);
+
+        g_stat_events.fetch_add(static_cast<uint64_t>(nfds), std::memory_order_relaxed);
+
+        auto now_ts = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ts - last_perf_ts).count();
+        if (elapsed_ms >= 1000) {
+            uint64_t bytes_in = g_stat_bytes_in.load(std::memory_order_relaxed);
+            uint64_t bytes_out = g_stat_bytes_out.load(std::memory_order_relaxed);
+            uint64_t packets_in = g_stat_packets_in.load(std::memory_order_relaxed);
+            uint64_t packets_out = g_stat_packets_out.load(std::memory_order_relaxed);
+            uint64_t drop_no_target = g_stat_drop_no_target.load(std::memory_order_relaxed);
+            uint64_t drop_small_packet = g_stat_drop_small_packet.load(std::memory_order_relaxed);
+            uint64_t drop_send_eagain = g_stat_drop_send_eagain.load(std::memory_order_relaxed);
+            uint64_t partial_writes = g_stat_partial_writes.load(std::memory_order_relaxed);
+            uint64_t write_errors = g_stat_write_errors.load(std::memory_order_relaxed);
+            uint64_t event_loops = g_stat_event_loops.load(std::memory_order_relaxed);
+            uint64_t events_cnt = g_stat_events.load(std::memory_order_relaxed);
+
+            double secs = static_cast<double>(elapsed_ms) / 1000.0;
+            uint64_t din = bytes_in - last_bytes_in;
+            uint64_t dout = bytes_out - last_bytes_out;
+            uint64_t pin = packets_in - last_packets_in;
+            uint64_t pout = packets_out - last_packets_out;
+            uint64_t d_drop_no_target = drop_no_target - last_drop_no_target;
+            uint64_t d_drop_small_packet = drop_small_packet - last_drop_small_packet;
+            uint64_t d_drop_send_eagain = drop_send_eagain - last_drop_send_eagain;
+            uint64_t d_partial_writes = partial_writes - last_partial_writes;
+            uint64_t d_write_errors = write_errors - last_write_errors;
+            uint64_t d_event_loops = event_loops - last_event_loops;
+            uint64_t d_events = events_cnt - last_events;
+
+            LOGI("PERF dt=%.2fs in=%lluB(%.2fMB/s) out=%lluB(%.2fMB/s) pin=%llu(%.0f/s) pout=%llu(%.0f/s) eagain_drop=%llu partial=%llu werr=%llu loops=%llu events=%llu",
+                 secs,
+                 static_cast<unsigned long long>(din), (din / secs) / (1024.0 * 1024.0),
+                 static_cast<unsigned long long>(dout), (dout / secs) / (1024.0 * 1024.0),
+                 static_cast<unsigned long long>(pin), pin / secs,
+                 static_cast<unsigned long long>(pout), pout / secs,
+                 static_cast<unsigned long long>(d_drop_send_eagain),
+                 static_cast<unsigned long long>(d_partial_writes),
+                 static_cast<unsigned long long>(d_write_errors),
+                 static_cast<unsigned long long>(d_event_loops),
+                 static_cast<unsigned long long>(d_events));
+
+            if (d_drop_no_target > 0 || d_drop_small_packet > 0) {
+                LOGI("PERF_DROP no_target=%llu small_packet=%llu",
+                     static_cast<unsigned long long>(d_drop_no_target),
+                     static_cast<unsigned long long>(d_drop_small_packet));
+            }
+
+            last_bytes_in = bytes_in;
+            last_bytes_out = bytes_out;
+            last_packets_in = packets_in;
+            last_packets_out = packets_out;
+            last_drop_no_target = drop_no_target;
+            last_drop_small_packet = drop_small_packet;
+            last_drop_send_eagain = drop_send_eagain;
+            last_partial_writes = partial_writes;
+            last_write_errors = write_errors;
+            last_event_loops = event_loops;
+            last_events = events_cnt;
+            last_perf_ts = now_ts;
+        }
 
         for (int i = 0; i < nfds; i++) {
             int fd = events[i].data.fd;
