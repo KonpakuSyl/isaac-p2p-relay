@@ -21,6 +21,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <array>
+#include <vector>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -144,6 +145,8 @@ struct Connection {
     uint8_t mark[MARK_SIZE];  // 8字节标记
     bool registered;           // 是否已注册
 
+    std::vector<uint8_t> send_buf;
+
     // 接收缓冲区（处理粘包/拆包）
     uint8_t recv_buf[BUFFER_SIZE];
     size_t recv_len;           // 当前缓冲区中的数据长度
@@ -169,6 +172,44 @@ struct Connection {
     }
 };
 
+static bool update_epoll_events(int epfd, int fd, bool want_write) {
+    struct epoll_event ev;
+    ev.data.fd = fd;
+    ev.events = EPOLLIN | (want_write ? EPOLLOUT : 0);
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+        LOGE("epoll_ctl MOD 失败 fd=%d: %s", fd, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static void flush_send_buffer(Connection& conn, int epfd) {
+    if (conn.fd < 0) {
+        return;
+    }
+    if (conn.send_buf.empty()) {
+        (void)update_epoll_events(epfd, conn.fd, false);
+        return;
+    }
+
+    while (!conn.send_buf.empty()) {
+        ssize_t sent = write(conn.fd, conn.send_buf.data(), conn.send_buf.size());
+        if (sent > 0) {
+            g_stat_bytes_out.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+            conn.send_buf.erase(conn.send_buf.begin(), conn.send_buf.begin() + sent);
+        } else if (sent == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            (void)update_epoll_events(epfd, conn.fd, true);
+            return;
+        } else {
+            g_stat_write_errors.fetch_add(1, std::memory_order_relaxed);
+            close_connection(conn.fd, epfd);
+            return;
+        }
+    }
+
+    (void)update_epoll_events(epfd, conn.fd, false);
+}
+
 // 将8字节标记转换为uint64_t用于map key
 inline uint64_t mark_to_key(const uint8_t* mark) {
     uint64_t key;
@@ -192,12 +233,23 @@ static std::atomic<uint64_t> g_stat_write_errors{0};
 static std::atomic<uint64_t> g_stat_event_loops{0};
 static std::atomic<uint64_t> g_stat_events{0};
 
+void close_connection(int fd, int epfd);
+
 // 信号处理函数 - 只能使用异步信号安全的操作
 void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
         // 只设置标志，不调用非异步信号安全的函数（如printf、syslog等）
         g_running = 0;
     }
+}
+
+void handle_client_write(int fd, int epfd) {
+    auto it = g_connections.find(fd);
+    if (it == g_connections.end()) {
+        close_connection(fd, epfd);
+        return;
+    }
+    flush_send_buffer(it->second, epfd);
 }
 
 // 设置socket为非阻塞模式
@@ -415,69 +467,21 @@ bool process_packet(Connection& conn, const uint8_t* data, uint32_t data_len, in
     // 转发数据（去掉前8字节目标标记，但保留长度前缀格式）
     uint32_t payload_len = data_len - MARK_SIZE;
     if (payload_len > 0) {
-        // 构建转发包: 4字节长度 + 实际数据
-        uint8_t len_buf[LENGTH_SIZE];
-        write_packet_length(len_buf, payload_len);
-
-        const uint8_t* payload = data + MARK_SIZE;
-
-        // 使用writev原子写入，避免长度和数据分开导致的协议损坏
-        struct iovec iov[2];
-        iov[0].iov_base = len_buf;
-        iov[0].iov_len = LENGTH_SIZE;
-        iov[1].iov_base = const_cast<uint8_t*>(payload);
-        iov[1].iov_len = payload_len;
-
-        size_t total_len = LENGTH_SIZE + payload_len;
-        ssize_t sent = writev(target_fd, iov, 2);
-        size_t forwarded_bytes = 0;
-
-        if (sent == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // 发送缓冲区满，丢弃此包（简单处理，避免复杂的写缓冲区管理）
-                LOGW("发送缓冲区满，丢弃数据 target_fd=%d size=%u", target_fd, payload_len);
-                g_stat_drop_send_eagain.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                LOGE("writev失败 target_fd=%d: %s", target_fd, strerror(errno));
-                g_stat_write_errors.fetch_add(1, std::memory_order_relaxed);
-                close_connection(target_fd, epfd);
-            }
-        } else if (static_cast<size_t>(sent) < total_len) {
-            // 部分写入，重试发送剩余数据
-            g_stat_partial_writes.fetch_add(1, std::memory_order_relaxed);
-            int retry_count = 3;
-            size_t total_sent = sent;
-            while (total_sent < total_len && retry_count > 0) {
-                ssize_t sent = write(target_fd, payload + total_sent, total_len - total_sent);
-                if (sent > 0) {
-                    total_sent += sent;
-                } else if (sent == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    retry_count--;
-                    usleep(100);
-                } else {
-                    LOGE("写入失败 target_fd=%d: %s", target_fd, strerror(errno));
-                    g_stat_write_errors.fetch_add(1, std::memory_order_relaxed);
-                    break;
-                }
-            }
-
-            forwarded_bytes = total_sent;
-
-            if (total_sent < total_len) {
-                LOGW("重试后仍有数据未发送 target_fd=%d sent=%zu/%zu",
-                     target_fd, total_sent, total_len);
-            }
-        } else {
-            LOGD("转发 from_fd=%d -> target_fd=%d size=%u", fd, target_fd, payload_len);
-            forwarded_bytes = static_cast<size_t>(sent);
+        auto t_it = g_connections.find(target_fd);
+        if (t_it == g_connections.end()) {
+            return true;
         }
 
-        if (forwarded_bytes > 0) {
-            g_stat_bytes_out.fetch_add(static_cast<uint64_t>(forwarded_bytes), std::memory_order_relaxed);
-            if (forwarded_bytes == total_len) {
-                g_stat_packets_out.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
+        Connection& target_conn = t_it->second;
+        size_t prev_size = target_conn.send_buf.size();
+        target_conn.send_buf.resize(prev_size + LENGTH_SIZE + payload_len);
+
+        write_packet_length(target_conn.send_buf.data() + prev_size, payload_len);
+        std::memcpy(target_conn.send_buf.data() + prev_size + LENGTH_SIZE, data + MARK_SIZE, payload_len);
+
+        g_stat_packets_out.fetch_add(1, std::memory_order_relaxed);
+
+        flush_send_buffer(target_conn, epfd);
     }
 
     return true;
@@ -738,6 +742,9 @@ int main(int argc, char* argv[]) {
                     close_connection(fd, epfd);
                 } else if (events[i].events & EPOLLIN) {
                     handle_client_data(fd, epfd);
+                }
+                if (events[i].events & EPOLLOUT) {
+                    handle_client_write(fd, epfd);
                 }
             }
         }
