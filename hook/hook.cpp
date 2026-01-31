@@ -5,6 +5,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <atomic>
 
 #include "p2p_network.h"
 
@@ -57,6 +58,9 @@ static uint16_t g_nPort = 27015;
 
 // 当前连接的PeerID
 static P2PPeerID g_connectedPeer = P2P_INVALID_PEER_ID;
+
+static std::atomic<bool> g_stopPumpThread{false};
+static HANDLE g_hPumpThread = NULL;
 
 // 调试: 记录原函数读取的数据
 static std::vector<uint8_t> g_originalReadData;
@@ -454,6 +458,14 @@ DWORD WINAPI InjectionThread(LPVOID lpParam) {
     return 0;
 }
 
+static DWORD WINAPI PumpThread(LPVOID) {
+    while (!g_stopPumpThread.load()) {
+        P2P_RunCallbacks();
+        Sleep(10);
+    }
+    return 0;
+}
+
 // ============================================================================
 // DLL入口点
 // ============================================================================
@@ -481,7 +493,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         } else {
             TraceInfo("P2P Debug Mode Client mode\nConnected to: %s:%u\nPeerID: %u", 
                 g_strRemoteIP.c_str(), g_nPort, g_connectedPeer);
+
+            P2P_SetAutoReconnect(g_connectedPeer, true, 500, 10 * 1000);
         }
+
+        g_stopPumpThread.store(false);
+        g_hPumpThread = CreateThread(NULL, 0, PumpThread, NULL, 0, NULL);
         
         // 创建线程，初始化完成后注入 VTable
         hInjectionThread = CreateThread(NULL, 0, InjectionThread, NULL, 0, NULL);
@@ -492,6 +509,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         break;
         
     case DLL_PROCESS_DETACH:
+        g_stopPumpThread.store(true);
+        if (g_hPumpThread) {
+            WaitForSingleObject(g_hPumpThread, 1000);
+            CloseHandle(g_hPumpThread);
+            g_hPumpThread = NULL;
+        }
+
         if (hInjectionThread) {
             // 等待注入线程结束（最多等1秒）
             WaitForSingleObject(hInjectionThread, 1000);
