@@ -1,0 +1,46 @@
+name: Client (Windows)
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [Win32, x64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (CMake)
+        run: cmake -S . -B build -A ${{ matrix.arch }}
+
+      - name: Build (Release)
+        run: cmake --build build --config Release
+
+      - name: Configure winmm (Win32 only)
+        if: matrix.arch == 'Win32'
+        run: cmake -S winmm -B build-winmm -A Win32
+
+      - name: Build winmm (Release, Win32 only)
+        if: matrix.arch == 'Win32'
+        run: cmake --build build-winmm --config Release
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}-release
+          path: |
+            build/bin/**/Release/*.dll
+            build/bin/**/Release/*.pdb
+            build/bin/**/Release/p2p_config.txt
+            build-winmm/**/Release/winmm.dll
+          if-no-files-found: error
