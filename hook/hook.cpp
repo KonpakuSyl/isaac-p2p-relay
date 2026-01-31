@@ -348,6 +348,13 @@ void ConnectionCallback(P2PPeerID peerID, bool connected, void* userData) {
     if (connected) {
         g_connectedPeer = peerID;  // 保存连接的 PeerID
         TraceInfo("P2P Connection Connected PeerID: %u Global PeerID: %u", peerID, g_connectedPeer);
+
+        if (g_localSteamID != 0) {
+            const size_t dataSize = sizeof(CSteamID);
+            uint8_t data[dataSize] = {0};
+            std::memcpy(data, &g_localSteamID, sizeof(CSteamID));
+            P2P_SendPacket(peerID, data, static_cast<uint32_t>(dataSize));
+        }
     } else {
         TraceInfo("P2P Connection Disconnected PeerID: %u", peerID);
         if (g_connectedPeer == peerID) {
@@ -509,6 +516,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         break;
         
     case DLL_PROCESS_DETACH:
+        if (g_connectedPeer != P2P_INVALID_PEER_ID) {
+            P2P_SetAutoReconnect(g_connectedPeer, false, 0, 0);
+            P2P_Disconnect(g_connectedPeer);
+            g_connectedPeer = P2P_INVALID_PEER_ID;
+        }
+
         g_stopPumpThread.store(true);
         if (g_hPumpThread) {
             WaitForSingleObject(g_hPumpThread, 1000);
