@@ -51,13 +51,15 @@ set_target_properties(p2p_network PROPERTIES
 )
 
 # 示例程序
-add_executable(p2p_example example/main.cpp)
-target_link_libraries(p2p_example PRIVATE p2p_network)
-target_include_directories(p2p_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/example/main.cpp")
+    add_executable(p2p_example example/main.cpp)
+    target_link_libraries(p2p_example PRIVATE p2p_network)
+    target_include_directories(p2p_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-set_target_properties(p2p_example PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/${P2P_ARCH}
-)
+    set_target_properties(p2p_example PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/${P2P_ARCH}
+    )
+endif()
 
 # Hook DLL
 add_library(p2p_hook SHARED hook/hook.cpp)
