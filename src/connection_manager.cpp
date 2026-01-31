@@ -491,7 +491,7 @@ void ConnectionManager::attemptReconnects() {
         }
 
         const uint32_t attempt = conn.reconnectAttempt;
-        conn.reconnectAttempt = (attempt == std::numeric_limits<uint32_t>::max()) ? attempt : (attempt + 1);
+        conn.reconnectAttempt = (attempt == (std::numeric_limits<uint32_t>::max)()) ? attempt : (attempt + 1);
 
         uint64_t delay = static_cast<uint64_t>(conn.reconnectBaseDelayMs);
         for (uint32_t i = 0; i < attempt; i++) {
