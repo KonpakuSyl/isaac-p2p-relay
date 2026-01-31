@@ -25,6 +25,26 @@ jobs:
       - name: Build (Release)
         run: cmake --build build --config Release
 
+      - name: Build reconnect integration test (Release)
+        run: cmake --build build --config Release --target p2p_reconnect_test
+
+      - name: Run reconnect integration test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build\bin -Recurse -Filter p2p_reconnect_test.exe | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "p2p_reconnect_test.exe not found under build\\bin"
+            exit 1
+          }
+          Write-Host "Running: $($exe.FullName)"
+          Push-Location $exe.Directory.FullName
+          & .\$($exe.Name)
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "p2p_reconnect_test failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
       - name: Configure winmm (Win32 only)
         if: matrix.arch == 'Win32'
         run: cmake -S winmm -B build-winmm -A Win32

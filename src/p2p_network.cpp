@@ -81,6 +81,14 @@ P2PResult P2P_Connect(const char* ip, uint16_t port, P2PPeerID* outPeerID) {
     return P2P_OK;
 }
 
+void P2P_SetAutoReconnect(P2PPeerID peerID, bool enable, uint32_t baseDelayMs, uint32_t maxDelayMs) {
+    if (!g_manager || !g_manager->isInitialized() || peerID == P2P_INVALID_PEER_ID) {
+        return;
+    }
+
+    g_manager->setAutoReconnect(peerID, enable, baseDelayMs, maxDelayMs);
+}
+
 void P2P_Disconnect(P2PPeerID peerID) {
     if (g_manager && peerID != P2P_INVALID_PEER_ID) {
         g_manager->disconnect(peerID);

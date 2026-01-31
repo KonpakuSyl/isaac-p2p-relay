@@ -79,3 +79,13 @@ add_custom_command(TARGET p2p_hook POST_BUILD
         ${CMAKE_BINARY_DIR}/bin/${P2P_ARCH}/$<CONFIG>/p2p_config.txt
     COMMENT "Copying p2p_config.txt to output directory"
 )
+
+# Reconnect integration test (Windows only)
+if(WIN32)
+    add_executable(p2p_reconnect_test tests/reconnect_integration_test.cpp)
+    target_link_libraries(p2p_reconnect_test PRIVATE p2p_network ws2_32)
+    target_include_directories(p2p_reconnect_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(p2p_reconnect_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/${P2P_ARCH}
+    )
+endif()
