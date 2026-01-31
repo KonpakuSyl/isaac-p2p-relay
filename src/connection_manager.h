@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <cstdint>
 
 namespace p2p {
 
@@ -21,6 +22,12 @@ struct Connection {
     std::string remoteIP;
     uint16_t remotePort = 0;
     bool connected = false;
+    
+    bool autoReconnect = false;
+    uint32_t reconnectBaseDelayMs = 500;
+    uint32_t reconnectMaxDelayMs = 10 * 1000;
+    uint32_t reconnectAttempt = 0;
+    uint64_t nextReconnectAtMs = 0;
     
     PacketQueue receiveQueue;    // 接收到的完整数据包队列
     ReceiveBuffer recvBuffer;    // 接收缓冲区 (用于 TCP 流解析)
@@ -91,6 +98,15 @@ public:
      * @return true 成功
      */
     bool connect(const char* ip, uint16_t port, P2PPeerID& outPeerID);
+    
+    /**
+     * 启用/禁用指定连接的自动重连
+     * @param peerID 对端 ID
+     * @param enable 是否启用
+     * @param baseDelayMs 初始重连延迟
+     * @param maxDelayMs 最大重连延迟
+     */
+    void setAutoReconnect(P2PPeerID peerID, bool enable, uint32_t baseDelayMs = 500, uint32_t maxDelayMs = 10 * 1000);
     
     /**
      * 断开指定连接
@@ -180,6 +196,11 @@ private:
     void removeDisconnected();
     
     /**
+     * 尝试重连
+     */
+    void attemptReconnects();
+    
+    /**
      * 通知连接事件
      */
     void notifyConnectionEvent(P2PPeerID peerID, ConnectionEvent event);
@@ -188,6 +209,10 @@ private:
      * 创建发送帧 (添加长度头)
      */
     static std::vector<uint8_t> createSendFrame(const void* data, uint32_t size);
+
+    static uint64_t nowMs();
+
+    static SocketHandle connectWithTimeout(const char* ip, uint16_t port, uint32_t timeoutMs);
 
 private:
     bool m_initialized = false;

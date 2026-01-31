@@ -75,6 +75,15 @@ P2P_API void P2P_StopListen(void);
 P2P_API P2PResult P2P_Connect(const char* ip, uint16_t port, P2PPeerID* outPeerID);
 
 /**
+ * 启用/禁用指定连接的自动重连
+ * @param peerID 对端 ID
+ * @param enable 是否启用
+ * @param baseDelayMs 初始重连延迟
+ * @param maxDelayMs 最大重连延迟
+ */
+P2P_API void P2P_SetAutoReconnect(P2PPeerID peerID, bool enable, uint32_t baseDelayMs, uint32_t maxDelayMs);
+
+/**
  * 断开与指定对端的连接
  * @param peerID 对端 ID
  */
