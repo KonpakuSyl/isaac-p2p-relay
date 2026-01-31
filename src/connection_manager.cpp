@@ -233,6 +233,128 @@ void ConnectionManager::disconnect(P2PPeerID peerID) {
     m_connections.erase(it);
 }
 
+bool ConnectionManager::sendPacket(P2PPeerID peerID, const void* data, uint32_t size) {
+    if (!data || size == 0) {
+        return false;
+    }
+
+    auto it = m_connections.find(peerID);
+    if (it == m_connections.end() || !it->second.connected) {
+        return false;
+    }
+
+    Connection& conn = it->second;
+
+    std::vector<uint8_t> frame = createSendFrame(data, size);
+
+    int sent = send(conn.socket, reinterpret_cast<const char*>(frame.data()),
+                    static_cast<int>(frame.size()), 0);
+
+    if (sent < 0) {
+        if (wouldBlock()) {
+            conn.sendBuffer.insert(conn.sendBuffer.end(), frame.begin(), frame.end());
+            return true;
+        }
+        conn.connected = false;
+        m_pendingRemove.push_back(peerID);
+        return false;
+    }
+
+    if (static_cast<size_t>(sent) < frame.size()) {
+        conn.sendBuffer.insert(conn.sendBuffer.end(), frame.begin() + sent, frame.end());
+    }
+
+    return true;
+}
+
+bool ConnectionManager::isPacketAvailable(P2PPeerID peerID, uint32_t* outSize, P2PPeerID* outPeerID) {
+    if (peerID != P2P_INVALID_PEER_ID) {
+        auto it = m_connections.find(peerID);
+        if (it == m_connections.end()) {
+            return false;
+        }
+
+        uint32_t size = 0;
+        if (it->second.receiveQueue.peek(size)) {
+            if (outSize) {
+                *outSize = size;
+            }
+            if (outPeerID) {
+                *outPeerID = peerID;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    for (auto& [pid, conn] : m_connections) {
+        uint32_t size = 0;
+        if (conn.receiveQueue.peek(size)) {
+            if (outSize) {
+                *outSize = size;
+            }
+            if (outPeerID) {
+                *outPeerID = pid;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ConnectionManager::readPacket(P2PPeerID peerID, void* buffer, uint32_t bufferSize,
+                                  uint32_t* outReadSize, P2PPeerID* outPeerID) {
+    if (!buffer || bufferSize == 0) {
+        return false;
+    }
+
+    Connection* conn = nullptr;
+    P2PPeerID sourcePeerID = P2P_INVALID_PEER_ID;
+
+    if (peerID != P2P_INVALID_PEER_ID) {
+        auto it = m_connections.find(peerID);
+        if (it == m_connections.end()) {
+            return false;
+        }
+        conn = &it->second;
+        sourcePeerID = peerID;
+    } else {
+        for (auto& [pid, c] : m_connections) {
+            uint32_t size = 0;
+            if (c.receiveQueue.peek(size)) {
+                conn = &c;
+                sourcePeerID = pid;
+                break;
+            }
+        }
+    }
+
+    if (!conn) {
+        return false;
+    }
+
+    Packet packet;
+    if (!conn->receiveQueue.pop(packet)) {
+        return false;
+    }
+
+    if (packet.size() > bufferSize) {
+        return false;
+    }
+
+    std::memcpy(buffer, packet.data.data(), packet.size());
+
+    if (outReadSize) {
+        *outReadSize = packet.size();
+    }
+    if (outPeerID) {
+        *outPeerID = sourcePeerID;
+    }
+
+    return true;
+}
+
 void ConnectionManager::processEvents() {
     if (!m_initialized) {
         return;
